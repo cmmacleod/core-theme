@@ -3,6 +3,7 @@
     var PaymentMethod = Backbone.MozuModel.extend({
         present: function (value, attr) {
             if (!this.selected) return undefined;
+            if (this.get('isSavedCard')) return false;
             if (!value) return this.validation[attr.split('.').pop()].msg || Hypr.getLabel('genericRequired');
         }
     });
@@ -134,11 +135,7 @@
         })
     });
 
-
-    var PayPal = PaymentMethod.extend({
-        mozuType: 'paypalpayment'
-    });
-
+    
     var Check = PaymentMethod.extend({
         validation: {
             nameOnCheck: {

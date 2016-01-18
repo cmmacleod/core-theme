@@ -1,4 +1,4 @@
-define([
+﻿define([
     'modules/jquery-mozu',
     'underscore',
     'hyprlive',
@@ -138,7 +138,6 @@ define([
                     me = this;
                 if (this.validate()) return false;
                 this.getOrder().apiModel.update({ fulfillmentInfo: me.toJSON() }).ensure(function () {
-                    me.provisional = false;
                     me.isLoading(false);
                     order.messages.reset();
                     order.syncApiModel();
@@ -162,7 +161,7 @@ define([
                     return false;
                 }
 
-                var parent = this.parent,
+               var parent = this.parent,
                     order = this.getOrder(),
                     me = this,
                     isAddressValidationEnabled = HyprLiveContext.locals.siteContext.generalSettings.isAddressValidationEnabled,
@@ -226,9 +225,15 @@ define([
 
         FulfillmentInfo = CheckoutStep.extend({
             initialize: function () {
-                // this adds the price and other metadata off the chosen method to the info object itself
-                this.updateShippingMethod(this.get('shippingMethodCode'));
+                var me = this;
                 this.on('change:availableShippingMethods', function (me, value) {
+                    me.updateShippingMethod(me.get('shippingMethodCode'));
+                });
+                _.defer(function () {
+                    // This adds the price and other metadata off the chosen
+                    // method to the info object itself.
+                    // This can only be called after the order is loaded
+                    // because the order data will impact the shipping costs.
                     me.updateShippingMethod(me.get('shippingMethodCode'));
                 });
             },
@@ -253,52 +258,58 @@ define([
                 this.updateShippingMethod();
             },
             calculateStepStatus: function () {
-                var st = 'new', available;
+                // If no shipping required, we're done.
                 if (!this.requiresFulfillmentInfo()) return this.stepStatus('complete');
-                if (this.provisional) return this.stepStatus('incomplete');
+
+                // If there's no shipping address yet, go blank.
                 if (this.get('fulfillmentContact').stepStatus() !== 'complete') {
                     return this.stepStatus('new');
                 }
-                available = this.get('availableShippingMethods');
-                if (available && available.length && _.findWhere(available, { shippingMethodCode: this.get('shippingMethodCode') })) {
-                    return this.stepStatus('complete');
-                }
-                return this.stepStatus('incomplete');
+
+                // Incomplete status for shipping is basically only used to show the Shipping Method's Next button,
+                // which does nothing but show the Payment Info step.
+                var billingInfo = this.parent.get('billingInfo');
+                if (!billingInfo || billingInfo.stepStatus() === 'new') return this.stepStatus('incomplete');
+
+                // Payment Info step has been initialized. Complete status hides the Shipping Method's Next button.
+                return this.stepStatus('complete');
             },
             updateShippingMethod: function (code) {
                 var available = this.get('availableShippingMethods'),
                     newMethod = _.findWhere(available, { shippingMethodCode: code }),
-                    lowestValue =  _.min(available, function(ob) { return ob.price; });
+                    lowestValue = _.min(available, function(ob) { return ob.price; }); // Returns Infinity if no items in collection.
 
-                if (!newMethod && available && lowestValue) {
+                if (!newMethod && available && available.length && lowestValue) {
                     newMethod = lowestValue;
-                    this.provisional = true;
                 }
                 if (newMethod) {
                     this.set(newMethod);
+                    this.applyShipping();
                 }
-
-                // wait for customer to be defined
-                _.defer((function() {
-                    var contacts = this.getOrder().get('customer').get('contacts'),
-                        isPrimaryShipping = contacts.filter(function(ob) {return ob.attributes.isPrimaryShippingContact;});
-
-                    // if this is our primary shipping information
-                    if (isPrimaryShipping.length > 0 && !newMethod) {
-                        this.stepStatus('complete');
-                    }
-                }).bind(this));
             },
-            next: function () {
+            applyShipping: function() {
                 if (this.validate()) return false;
                 var me = this;
                 this.isLoading(true);
-                this.getOrder().apiModel.update({ fulfillmentInfo: me.toJSON() }).ensure(function () {
-                    me.provisional = false;
-                    me.isLoading(false);
-                    me.calculateStepStatus();
-                    me.parent.get('billingInfo').calculateStepStatus();
-                });
+                var order = this.getOrder();
+                if (order) {
+                    order.apiModel.update({ fulfillmentInfo: me.toJSON() })
+                        .then(function (o) {
+                            var billingInfo = me.parent.get('billingInfo');
+                            if (billingInfo) {
+                                billingInfo.loadCustomerDigitalCredits();
+                            }
+                        })
+                        .ensure(function() {
+                            me.isLoading(false);
+                            me.calculateStepStatus();
+                            me.parent.get('billingInfo').calculateStepStatus();
+                        });
+                }
+            },
+            next: function () {
+                this.stepStatus('complete');
+                this.parent.get('billingInfo').calculateStepStatus();
             }
         }),
 
@@ -309,11 +320,14 @@ define([
 
                     fn: "validatePaymentType"
                 },
+                savedPaymentMethodId: {
+                    fn: "validateSavedPaymentMethodId"
+                },
 
                 'billingContact.email': {
                     pattern: 'email',
                     msg: Hypr.getLabel('emailMissing')
-                } 
+                }
             },
             dataTypes: {
                 'isSameBillingShippingAddress': Backbone.MozuModel.DataTypes.Boolean,
@@ -325,14 +339,22 @@ define([
                 check: PaymentMethods.Check
             },
             validatePaymentType: function(value, attr) {
-              var order = this.getOrder(); 
-              var payment = order.apiModel.getCurrentPayment();
-              var errorMessage = Hypr.getLabel('paymentTypeMissing');
-              if (!value) return errorMessage;
-              if ((value === "StoreCredit" || value === "GiftCard") && this.nonStoreCreditTotal() > 0 && !payment) return errorMessage;
+                var order = this.getOrder();
+                var payment = order.apiModel.getCurrentPayment();
+                var errorMessage = Hypr.getLabel('paymentTypeMissing');
+                if (!value) return errorMessage;
+                if ((value === "StoreCredit" || value === "GiftCard") && this.nonStoreCreditTotal() > 0 && !payment) return errorMessage;
+
+            },
+            validateSavedPaymentMethodId: function (value, attr, computedState) {
+                if (this.get('usingSavedCard')) {
+                    var isValid = this.get('savedPaymentMethodId');
+                    if (!isValid) return Hypr.getLabel('selectASavedCard');
+                }
+
             },
             helpers: ['acceptsMarketing', 'savedPaymentMethods', 'availableStoreCredits', 'applyingCredit', 'maxCreditAmountToApply',
-                'activeStoreCredits', 'nonStoreCreditTotal', 'activePayments', 'hasSavedCardPayment', 'availableDigitalCredits', 'digitalCreditPaymentTotal', 'isAnonymousShopper', 'visaCheckoutFlowComplete'],
+              'activeStoreCredits', 'nonStoreCreditTotal', 'activePayments', 'hasSavedCardPayment', 'availableDigitalCredits', 'digitalCreditPaymentTotal', 'isAnonymousShopper', 'visaCheckoutFlowComplete'],
             acceptsMarketing: function () {
                 return this.getOrder().get('acceptsMarketing');
             },
@@ -346,6 +368,7 @@ define([
                 return order.apiVoidPayment(currentPayment.id).then(function() {
                     self.clear();
                     self.stepStatus('incomplete');
+                    self.setDefaultPaymentType(self);
                 });
             },
             activePayments: function () {
@@ -366,6 +389,13 @@ define([
                     return sum + credit.amountRequested;
                 }, 0);
                 return me.roundToPlaces(result, 2);
+            },
+            resetAddressDefaults: function () {
+                var billingAddress = this.get('billingContact').get('address');
+                var addressDefaults = billingAddress.defaults;
+                billingAddress.set('countryCode', addressDefaults.countryCode);
+                billingAddress.set('addressType', addressDefaults.addressType);
+                billingAddress.set('candidateValidatedAddresses', addressDefaults.candidateValidatedAddresses);
             },
             savedPaymentMethods: function () {
                 var cards = this.getOrder().get('customer').get('cards').toJSON();
@@ -501,6 +531,21 @@ define([
                 return this._cachedDigitalCredits && this._cachedDigitalCredits.length > 0 && this._cachedDigitalCredits;
             },
 
+            refreshBillingInfoAfterAddingStoreCredit: function (order, updatedOrder) {
+                //clearing existing order billing info because information may have been removed (payment info) #68583
+
+                // #73389 only refresh if the payment requirement has changed after adding a store credit.
+                var activePayments = this.activePayments();
+                var hasNonStoreCreditPayment = (_.filter(activePayments, function (item) { return item.paymentType !== 'StoreCredit'; })).length > 0;
+                if ((order.get('amountRemainingForPayment') >= 0 && !hasNonStoreCreditPayment) ||
+                    (order.get('amountRemainingForPayment') < 0 && hasNonStoreCreditPayment)) {
+                    order.get('billingInfo').clear();
+                    order.set(updatedOrder, { silent: true });
+                }
+                this.trigger('orderPayment', updatedOrder, this);
+
+            },
+
             applyDigitalCredit: function (creditCode, creditAmountToApply, isEnabled) {
                 var self = this,
                     order = self.getOrder(),
@@ -563,10 +608,10 @@ define([
                                 
                                 return order.apiAddStoreCredit({
                                     storeCreditCode: creditCode,
-                                    amount: creditAmountToApply
+                                    amount: creditAmountToApply,
+                                    email: self.get('billingContact').get('email')
                                 }).then(function (o) {
-                                    order.set(o.data);
-                                    self.trigger('orderPayment', o.data, self);
+                                    self.refreshBillingInfoAfterAddingStoreCredit(order, o.data);
                                     return o;
                                 });
                             });
@@ -587,12 +632,10 @@ define([
 
                 return order.apiAddStoreCredit({
                     storeCreditCode: creditCode,
-                    amount: creditAmountToApply
+                    amount: creditAmountToApply,
+                    email: self.get('billingContact').get('email')
                 }).then(function (o) {
-                    //clearing existing order billing info because information may have been removed (payment info) #68583
-                    order.get('billingInfo').clear();
-                    order.set(o.data, {silent: true});
-                    self.trigger('orderPayment', o.data, self);
+                    self.refreshBillingInfoAfterAddingStoreCredit(order, o.data);
                     return o;
                 });
             },
@@ -762,11 +805,18 @@ define([
             },
             getPaymentTypeFromCurrentPayment: function () {
                 var billingInfoPaymentType = this.get('paymentType'),
+                    billingInfoPaymentWorkflow = this.get('paymentWorkflow'),
                     currentPayment = this.getOrder().apiModel.getCurrentPayment(),
-                    currentPaymentType = currentPayment && currentPayment.billingInfo.paymentType;
+                    currentPaymentType = currentPayment && currentPayment.billingInfo.paymentType,
+                    currentPaymentWorkflow = currentPayment && currentPayment.billingInfo.paymentWorkflow,
+                    currentBillingContact = currentPayment && currentPayment.billingInfo.billingContact,
+                    currentCard = currentPayment && currentPayment.billingInfo.card;
 
-                if (currentPaymentType && currentPaymentType !== billingInfoPaymentType) {
-                    this.set('paymentType', currentPaymentType);
+                if (currentPaymentType && (currentPaymentType !== billingInfoPaymentType || currentPaymentWorkflow !== billingInfoPaymentWorkflow)) {
+                    this.set('paymentType', currentPaymentType, { silent: true });
+                    this.set('paymentWorkflow', currentPaymentWorkflow, { silent: true });
+                    this.set('card', currentCard, { silent: true });
+                    this.set('billingContact', currentBillingContact, { silent: true });
                 }
             },
             edit: function () {
@@ -782,11 +832,17 @@ define([
                     me.set('savedPaymentMethodId', savedCardId, { silent: true });
                     me.setSavedPaymentMethod(savedCardId);
 
+                    if (!savedCardId) {
+                        me.setDefaultPaymentType(me);
+                    }
+
                     me.on('change:usingSavedCard', function (me, yes) {
                         if (!yes) {
                             me.get('card').clear();
+                            me.set('usingSavedCard', false);
                         }
                         else {
+                            me.set('isSameBillingShippingAddress', false);
                             me.setSavedPaymentMethod(me.get('savedPaymentMethodId'));
                         }
                     });
@@ -811,36 +867,26 @@ define([
                 me.get('check').selected = newPaymentType === 'Check';
                 me.get('card').selected = newPaymentType === 'CreditCard';
             },
+            setDefaultPaymentType: function(me) {
+                me.set('paymentType', 'CreditCard');
+                if (me.savedPaymentMethods() && me.savedPaymentMethods().length > 0) {
+                    me.set('usingSavedCard', true);
+                }
+            },
             calculateStepStatus: function () {
                 var fulfillmentComplete = this.parent.get('fulfillmentInfo').stepStatus() === 'complete',
                     activePayments = this.activePayments(),
                     thereAreActivePayments = activePayments.length > 0,
                     paymentTypeIsCard = activePayments && !!_.findWhere(activePayments, { paymentType: 'CreditCard' }),
-                    paymentTypeIsPayPal = activePayments && !!_.findWhere(activePayments, { paymentType: 'PaypalExpress' }),
                     balanceNotPositive = this.parent.get('amountRemainingForPayment') <= 0;
 
                 if (paymentTypeIsCard && !Hypr.getThemeSetting('isCvvSuppressed')) return this.stepStatus('incomplete'); // initial state for CVV entry
 
                 if (!fulfillmentComplete) return this.stepStatus('new');
 
-                if (paymentTypeIsPayPal && window.location.href.indexOf('PaypalExpress=') === -1) return this.stepStatus('incomplete'); // This should handle back button/reload cases!
-
                 if (thereAreActivePayments && (balanceNotPositive || (this.get('paymentType') === 'PaypalExpress' && window.location.href.indexOf('PaypalExpress=complete') !== -1))) return this.stepStatus('complete');
                 return this.stepStatus('incomplete');
 
-            },
-            getPaypalUrls: function () {
-                var base = window.location.href + (window.location.href.indexOf('?') !== -1 ? '&' : '?');
-
-                //Remove the already existing Paypal parameters from URL
-                if (base.indexOf('PaypalExpress=') != -1) {
-                    base = base.substring(0, base.indexOf('PaypalExpress='));
-                }
-               
-                return {
-                    paypalReturnUrl: base + 'PaypalExpress=complete',
-                    paypalCancelUrl: base + 'PaypalExpress=canceled'
-                };
             },
             hasPaymentChanged: function(payment) {
 
@@ -865,11 +911,13 @@ define([
                         card: _.extend(_.pick(obj.card,
                             'expireMonth',
                             'expireYear',
-                            'nameOnCard'),
+                            'nameOnCard',
+                            'isSavedCardInfo'),
                         {
                             cardType: obj.card.paymentOrCardType || obj.card.cardType,
                             cardNumber: obj.card.cardNumberPartOrMask || obj.card.cardNumberPart || obj.card.cardNumber,
-                            id: obj.card.paymentServiceCardId || obj.card.id
+                            id: obj.card.paymentServiceCardId || obj.card.id,
+                            isCardInfoSaved: obj.card.isCardInfoSaved || false
                         }),
                         check: obj.check || {}
                     };
@@ -899,7 +947,9 @@ define([
                 if (currentPayment) {
                     this.get('card').set('isVisaCheckout', currentPayment.paymentWorkflow.toLowerCase() === 'visacheckout');
                 }
+
                 var val = this.validate();
+
                 if (this.nonStoreCreditTotal() > 0 && val) {
                     // display errors:
                     var error = {"items":[]};
@@ -931,17 +981,17 @@ define([
             },
             applyPayment: function () {
                 var self = this, order = this.getOrder();
-                if (this.get('paymentType') === 'PaypalExpress') {
-                    this.set(this.getPaypalUrls());
-                } else {
-                    this.unset('paypalReturnUrl');
-                    this.unset('paypalCancelUrl');
-                }
                 this.syncApiModel();
                 if (this.nonStoreCreditTotal() > 0) {
                     return order.apiAddPayment().then(function() {
                         var payment = order.apiModel.getCurrentPayment();
                         var modelCard, modelCvv;
+                        var activePayments = order.apiModel.getActivePayments();
+                        var creditCardPayment = activePayments && _.findWhere(activePayments, { paymentType: 'CreditCard' });
+                        //Clear card if no credit card payments exists
+                        if (!creditCardPayment && self.get('card')) {
+                            self.get('card').clear();
+                        }
                         if (payment) {
                             switch (payment.paymentType) {
                                 case 'CreditCard':
@@ -953,9 +1003,8 @@ define([
                                         modelCard.set('cvv', '***');
                                         // to hide CVV once it has been sent to the paymentservice
                                     }
+
                                     self.markComplete();
-                                    break;
-                                case 'PaypalExpress':
                                     break;
                                 default:
                                     self.markComplete();
@@ -1043,12 +1092,11 @@ define([
                         steps = [fulfillmentInfo, fulfillmentContact, billingInfo],
                         paymentWorkflow = latestPayment && latestPayment.paymentWorkflow,
                         visaCheckoutPayment = activePayments && _.findWhere(activePayments, { paymentWorkflow: 'VisaCheckout' }),
-                        paypalCancelled = (latestPayment && latestPayment.paymentType === 'PaypalExpress' && window.location.href.indexOf('PaypalExpress=canceled') !== -1),
                         allStepsComplete = function () {
                             return _.reduce(steps, function(m, i) { return m + i.stepStatus(); }, '') === 'completecompletecomplete';
                         },
-                        isReady = allStepsComplete() && !(paypalCancelled);
-                        
+                        isReady = allStepsComplete();
+
                     //Visa checkout payments can be added to order without UIs knowledge. This evaluates and voids the required payments.
                     if (visaCheckoutPayment) {
                         _.each(_.filter(self.apiModel.getActivePayments(), function (payment) {
@@ -1065,7 +1113,7 @@ define([
                     if (paymentWorkflow) {
                         billingInfo.set('paymentWorkflow', paymentWorkflow);
                         billingInfo.get('card').set({
-                            isCvvOptional: true,
+                            isCvvOptional: Hypr.getThemeSetting('isCvvSuppressed'),
                             paymentWorkflow: paymentWorkflow
                         });
                         billingInfo.trigger('stepstatuschange'); // trigger a rerender
@@ -1092,16 +1140,6 @@ define([
                     var billingEmail = billingInfo.get('billingContact.email');
                     if (!billingEmail && user.email) billingInfo.set('billingContact.email', user.email);
 
-                    if (paypalCancelled) {
-                        self.apiVoidPayment(latestPayment.id).then(function (o) {
-                            self.set(o.data);
-                            self.trigger('error', {
-                                message: Hypr.getLabel('paypalExpressCancelled')
-                            });
-                            return o;
-                        });
-                    }
-
                 });
                 if (user.isAuthenticated) {
                     this.set('customer', { id: user.accountId });
@@ -1120,7 +1158,7 @@ define([
                 me.runForAllSteps(function() {
                     this.isLoading(true);
                 });
-                order.trigger('beforerefresh');
+                me.trigger('beforerefresh');
                 // void active payments; if there are none then the promise will resolve immediately
                 return api.all.apply(api, _.map(_.filter(me.apiModel.getActivePayments(), function(payment) {
                     return payment.paymentType !== 'StoreCredit' && payment.paymentType !== 'GiftCard';
@@ -1152,6 +1190,8 @@ define([
                 var visaCheckoutPayment = activePayments && _.findWhere(activePayments, { paymentWorkflow: 'VisaCheckout' });
                 if (visaCheckoutPayment) {
                     billingInfo.set('card', visaCheckoutPayment.billingInfo.card);
+                    billingInfo.set('usingSavedCard', false);
+                    billingInfo.unset('savedPaymentMethodId');
                     billingInfo.unset('billingContact');
                     billingInfo.set('billingContact', visaCheckoutPayment.billingInfo.billingContact, { silent:true });
                     billingInfo.set('paymentWorkflow', visaCheckoutPayment.paymentWorkflow);
@@ -1293,15 +1333,28 @@ define([
             addCustomerContact: function (infoName, contactName, contactTypes) {
                 var customer = this.get('customer'),
                     contactInfo = this.get(infoName),
-                    contact = contactInfo.get(contactName).toJSON(),
-                    process = [function() {
-                        if (contact.id === -1 || contact.id === 1 || contact.id === 'new') delete contact.id;
-                        return customer.apiModel.addContact(contact).then(function(contactResult) {
-                            contact.id = contactResult.data.id;
-                            return contactResult;
-                        });
-                    }];
+                    process = [function () {
+                      
+                        // Update contact if a valid contact ID exists
+                        if (orderContact.id && orderContact.id > 0) {
+                            return customer.apiModel.updateContact(orderContact);
+                        }
 
+                        if (orderContact.id === -1 || orderContact.id === 1 || orderContact.id === 'new') {
+                            delete orderContact.id;
+                        }
+                        return customer.apiModel.addContact(orderContact).then(function(contactResult) {
+                                orderContact.id = contactResult.data.id;
+                                return contactResult;
+                            });
+                    }];
+                var contactInfoContactName = contactInfo.get(contactName);
+                var customerContacts = this.get('customer').get('contacts');
+                    
+                if (!contactInfoContactName.get('accountId')) {
+                    contactInfoContactName.set('accountId', customer.id);
+                }
+                var orderContact = contactInfoContactName.toJSON();
                 // if customer doesn't have a primary of any of the contact types we're setting, then set primary for those types
                 if (!this.isSavingNewCustomer()) {
                     process.unshift(function() {
@@ -1323,19 +1376,38 @@ define([
                 }
 
                 // handle email
-                if (!contact.email) contact.email = this.get('emailAddress') || customer.get('emailAddress') || require.mozuData('user').email;
+                if (!orderContact.email) orderContact.email = this.get('emailAddress') || customer.get('emailAddress') || require.mozuData('user').email;
 
-                var contactId = contact.contactId;
-                if (contactId) contact.id = contactId;
-
-                if (!contact.id || contact.id === -1 || contact.id === 1 || contact.id === 'new') {
-                    contact.types = contactTypes;
+                var contactId = orderContact.contactId;
+                if (contactId) orderContact.id = contactId;
+                if (!orderContact.id || orderContact.id === -1 || orderContact.id === 1 || orderContact.id === 'new') {
+                    orderContact.types = contactTypes;
                     return api.steps(process);
                 } else {
-                    var deferred = api.defer();
-                    deferred.resolve();
-                    return deferred.promise;
+                    var customerContact = customerContacts.get(orderContact.id).toJSON();
+                    if (this.isContactModified(orderContact, customerContact)) {
+                        //keep the current types on edit
+                        orderContact.types = orderContact.types ? orderContact.types : customerContact.types;
+                        return api.steps(process);
+                    } else {
+                        var deferred = api.defer();
+                        deferred.resolve();
+                        return deferred.promise;
+                    }
                 }
+            },
+            isContactModified: function(orderContact, customerContact) {
+                var validContact = orderContact && customerContact && orderContact.id === customerContact.id;
+                var addressChanged = validContact && !_.isEqual(orderContact.address, customerContact.address);
+                //Note: Only home phone is used on the checkout page     
+                var phoneChanged = validContact && orderContact.phoneNumbers.home &&
+                                    (!customerContact.phoneNumbers.home || orderContact.phoneNumbers.home !== customerContact.phoneNumbers.home);
+
+                //Check whether any of the fields available in the contact UI on checkout page is modified
+                return validContact &&
+                    (addressChanged || phoneChanged || 
+                    orderContact.email !== customerContact.email || orderContact.firstName !== customerContact.firstName ||
+                    orderContact.lastNameOrSurname !== customerContact.lastNameOrSurname);
             },
             saveCustomerCard: function () {
                 var order = this,
@@ -1407,55 +1479,7 @@ define([
             isSavingNewCustomer: function() {
                 return this.get('createAccount') && !this.customerCreated;
             },
-            //finalPaymentReconcile: function() {
 
-            //    var order = this,
-            //        total = this.get('total'),
-            //        activePayments = this.apiModel.getActivePayments(),
-            //        currentPayment = this.apiModel.getCurrentPayment(),
-            //        billingInfo,
-            //        difference = Math.round((_.reduce(activePayments, function(sum, payment) { return sum + payment.amountRequested; }, 0) - total) * 100) / 100,
-            //        deferred;
-
-            //    if (difference === 0) {
-            //        // no recalculation necessary, simply return a fulfilled promise to continue
-            //        deferred = api.defer();
-            //        deferred.resolve(true);
-            //        return deferred.promise;
-            //    } else {
-            //        billingInfo = order.get('billingInfo');
-            //        if (!currentPayment || activePayments.length > 1 || currentPayment.paymentType === 'PaypalExpress') {
-            //            // if store credits or PayPal are being used,
-            //            // or multiple payments are active,
-            //            // or the order total has increased,
-            //            // void all payments and ask the shopper to recalculate payment manually
-            //            return api.all.apply(api, activePayments.map(function(payment) { return order.apiVoidPayment(payment.id); })).then(function() {
-            //                order.get('customer.credits').each(function(credit) {
-            //                    // blank out cached credits manually
-            //                    credit.set({
-            //                        isEnabled: false,
-            //                        creditAmountApplied: 0,
-            //                        remainingBalance: credit.get('currentBalance')
-            //                    });
-            //                });
-            //                return billingInfo.loadCustomerDigitalCredits();
-            //            }).then(function() {
-            //                billingInfo.clear();
-            //                billingInfo.stepStatus('incomplete');
-            //                throw new Error(Hypr.getLabel('recalculatePayments'));
-            //            });
-            //        } else {
-            //            // in the simplest, most common case, where the order total has reduced and only one
-            //            // payment method is active, then we can automatically deduct the difference
-
-            //            currentPayment.amountRequested = total;
-            //            billingInfo.set(currentPayment);
-            //            return order.update();
-                        
-            //        }
-            //    }
-
-            //},
             submit: function () {
                 var order = this,
                     billingInfo = this.get('billingInfo'),
@@ -1479,7 +1503,10 @@ define([
                 this.isSubmitting = true;
 
                 if (requiresBillingInfo && !billingContact.isValid()) {
-                    billingContact.set(this.apiModel.getCurrentPayment().billingInfo.billingContact); // reconcile the empty address after we got back from paypal and possibly other situations
+                    // reconcile the empty address after we got back from paypal and possibly other situations.
+                    // also happens with visacheckout ..
+                    var billingInfoFromPayment = this.apiModel.getCurrentPayment().billingInfo;
+                    billingInfo.set(billingInfoFromPayment, { silent: true });
                 }
 
                 this.syncBillingAndCustomerEmail();
