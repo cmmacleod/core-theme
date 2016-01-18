@@ -15,7 +15,11 @@ The following table shows you which features from the Mozu November 2015 Service
 | PayPal Express Application by Mozu	| [PayPal Express](https://github.com/Mozu/PayPalExpress-Theme) | N/A |
 
 ##HOW TO UPGRADE YOUR THEME
-You can use the [Mozu Theme Generator](https://www.npmjs.com/package/generator-mozu-theme) to update an existing theme to include changes in this version. You can also run the generator in an empty directory to clone these files as the basis for a brand new theme. 
+You can use the [Mozu Theme Generator](https://www.npmjs.com/package/generator-mozu-theme) to update a legacy theme to include changes in this version of Core. You can also run the generator in an empty directory to clone these files as the basis for a brand new theme. 
 
-When you run the Mozu Theme Generator, the tools create a git remote to the Mozu [core-theme](https://github.com/Mozu/core-theme/tree/master) repository. In the future, if you run the generator from your local theme directory, the tool will automatically check the Mozu Core theme for updates and offer to merge them for you.
+When you run the Mozu Theme Generator, the tools create a git remote to the Mozu [core-theme](https://github.com/Mozu/core-theme/tree/master) repository. In the future, you can open a terminal or command prompt and run:
+
+`grunt mozutheme:check` 
+
+in your local theme directory to check for updates to the Core theme.
 
